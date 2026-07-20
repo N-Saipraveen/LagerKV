@@ -1,0 +1,223 @@
+package store
+
+import (
+	"encoding/binary"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+)
+
+const (
+	// DefaultMaxSegmentSize is the default maximum size for a segment file (10MB)
+	DefaultMaxSegmentSize = 10 * 1024 * 1024
+
+	// DefaultMaxEntriesPerSegment is the default maximum number of entries per segment
+	DefaultMaxEntriesPerSegment = 10000
+)
+
+// Segment represents a single segment file in the append-only log
+type Segment struct {
+	mu         sync.RWMutex
+	id         int
+	path       string
+	file       *os.File
+	size       int64
+	entryCount int
+	maxSize    int64
+	maxEntries int
+	isActive   bool
+	isClosed   bool
+}
+
+// NewSegment creates a new segment
+func NewSegment(id int, basePath string) (*Segment, error) {
+	path := filepath.Join(basePath, fmt.Sprintf("segment_%d.log", id))
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create segment file: %w", err)
+	}
+
+	// Get current file size
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to stat segment file: %w", err)
+	}
+
+	segment := &Segment{
+		id:         id,
+		path:       path,
+		file:       file,
+		size:       stat.Size(),
+		maxSize:    DefaultMaxSegmentSize,
+		maxEntries: DefaultMaxEntriesPerSegment,
+		isActive:   true,
+		isClosed:   false,
+	}
+
+	return segment, nil
+}
+
+// OpenSegment opens an existing segment for reading
+func OpenSegment(id int, basePath string) (*Segment, error) {
+	path := filepath.Join(basePath, fmt.Sprintf("segment_%d.log", id))
+
+	file, err := os.OpenFile(path, os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open segment file: %w", err)
+	}
+
+	// Get current file size
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to stat segment file: %w", err)
+	}
+
+	segment := &Segment{
+		id:         id,
+		path:       path,
+		file:       file,
+		size:       stat.Size(),
+		maxSize:    DefaultMaxSegmentSize,
+		maxEntries: DefaultMaxEntriesPerSegment,
+		isActive:   false,
+		isClosed:   false,
+	}
+
+	return segment, nil
+}
+
+// Append writes an entry to the segment
+func (s *Segment) Append(entry *Entry) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isClosed {
+		return 0, ErrSegmentClosed
+	}
+
+	if !s.isActive {
+		return 0, ErrSegmentClosed
+	}
+
+	// Check if segment is full
+	if s.size >= s.maxSize || s.entryCount >= s.maxEntries {
+		s.isActive = false
+		return 0, ErrSegmentFull
+	}
+
+	// Serialize entry
+	data := entry.Serialize()
+
+	// Write to file
+	offset := s.size
+	_, err := s.file.Write(data)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write entry: %w", err)
+	}
+
+	// Update segment stats
+	s.size += int64(len(data))
+	s.entryCount++
+
+	return offset, nil
+}
+
+// Read reads an entry from the segment at the given position
+func (s *Segment) Read(pos int64) (*Entry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if pos >= s.size {
+		return nil, fmt.Errorf("position %d is beyond segment size %d", pos, s.size)
+	}
+
+	// Read entry header (20 bytes: checksum + timestamp + expiry + keysize + valuesize)
+	header := make([]byte, 20)
+	_, err := s.file.ReadAt(header, pos)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read entry header: %w", err)
+	}
+
+	// Parse sizes: KeySize (bytes 12:16) and ValueSize (bytes 16:20)
+	keySize := binary.LittleEndian.Uint32(header[12:16])
+	valueSize := binary.LittleEndian.Uint32(header[16:20])
+
+	// Read full entry data
+	entrySize := 20 + int(keySize) + int(valueSize)
+	entryData := make([]byte, entrySize)
+	_, err = s.file.ReadAt(entryData, pos)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read entry data: %w", err)
+	}
+
+	return DeserializeEntry(entryData)
+}
+
+// Close closes the segment
+func (s *Segment) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isClosed {
+		return nil
+	}
+
+	s.isActive = false
+	s.isClosed = true
+
+	return s.file.Close()
+}
+
+// IsActive returns whether the segment is active (can be written to)
+func (s *Segment) IsActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.isActive && !s.isClosed
+}
+
+// Size returns the current size of the segment
+func (s *Segment) Size() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.size
+}
+
+// EntryCount returns the number of entries in the segment
+func (s *Segment) EntryCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.entryCount
+}
+
+// ID returns the segment ID
+func (s *Segment) ID() int {
+	return s.id
+}
+
+// Path returns the segment file path
+func (s *Segment) Path() string {
+	return s.path
+}
+
+// Delete the segment
+func (s *Segment) Delete() error {
+	if !s.isClosed {
+		s.file.Close()
+	}
+	if err := os.Remove(s.Path()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Flush fsyncs the segment file to durable storage.
+func (s *Segment) Flush() error {
+	if s.file == nil {
+		return nil
+	}
+	return s.file.Sync()
+}

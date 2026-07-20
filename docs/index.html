@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LagerKV Store - Bitcask Inspired Key-Value Engine</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for beautiful icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Main Style Sheet -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Background glow elements for rich dark aesthetic -->
+    <div class="glow-bg">
+        <div class="glow-sphere glow-1"></div>
+        <div class="glow-sphere glow-2"></div>
+    </div>
+
+    <!-- Header Section -->
+    <header class="navbar">
+        <div class="nav-container">
+            <div class="logo">
+                <i class="fa-solid fa-database logo-icon"></i>
+                <span class="logo-text">LagerKV<span class="logo-accent">Store</span></span>
+            </div>
+            <nav class="nav-links">
+                <a href="#about">About</a>
+                <a href="#features">Features</a>
+                <a href="#architecture">Architecture</a>
+                <a href="#simulator">Interactive Demo</a>
+                <a href="#cli">CLI & Usage</a>
+            </nav>
+            <a href="https://github.com/N-Saipraveen/LagerKV" target="_blank" class="github-btn">
+                <i class="fa-brands fa-github"></i> GitHub
+            </a>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <!-- Hero Section -->
+        <section class="hero-section" id="about">
+            <div class="hero-badge">
+                <span class="badge-text"><i class="fa-solid fa-bolt"></i> High Performance Storage Engine</span>
+            </div>
+            <h1 class="hero-title">
+                Append-Only Logs Meet <br>
+                <span class="gradient-text">In-Memory Hash Indexes</span>
+            </h1>
+            <p class="hero-subtitle">
+                A lightweight, high-performance Key-Value store built in Go, inspired by the Bitcask model. Developed with process locking, data checksums, active log rotation, fsync strategies, and TTL expiration support.
+            </p>
+            <div class="hero-actions">
+                <a href="#simulator" class="btn btn-primary">Try Interactive Simulator</a>
+                <a href="https://github.com/N-Saipraveen/LagerKV" target="_blank" class="btn btn-secondary">
+                    <i class="fa-brands fa-github"></i> Clone Repository
+                </a>
+            </div>
+        </section>
+
+        <!-- Feature Cards -->
+        <section class="features-section" id="features">
+            <div class="section-header">
+                <h2 class="section-title">Engine Features</h2>
+                <p class="section-description">Core principles built into the storage engine for efficiency, durability, and correctness.</p>
+            </div>
+            <div class="features-grid">
+                <!-- Card 1 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-pen-nib"></i></div>
+                    <h3>Append-Only Log</h3>
+                    <p>Writes are sequentially appended to log segments, converting random disk I/O into lightning-fast sequential writes for high throughput.</p>
+                </div>
+                <!-- Card 2 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-list-check"></i></div>
+                    <h3>In-Memory Index</h3>
+                    <p>A hash map index (KeyDir) tracks record offsets in memory. Reads perform an O(1) memory lookup to find the file offset, requiring exactly one disk seek.</p>
+                </div>
+                <!-- Card 3 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-shield-halved"></i></div>
+                    <h3>CRC32 Checksums</h3>
+                    <p>Protects against bit rot and data corruption. Each record is verified with an IEEE CRC32 checksum on startup and subsequent disk reads.</p>
+                </div>
+                <!-- Card 4 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-clock"></i></div>
+                    <h3>TTL Expiration</h3>
+                    <p>Allows keys to expire dynamically. Expired keys are hidden from requests instantly and swept away automatically during log compaction.</p>
+                </div>
+                <!-- Card 5 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-lock"></i></div>
+                    <h3>Process locking</h3>
+                    <p>Ensures database directory safety. Uses flock-based exclusive locking on startup to prevent data corruption from concurrent writers.</p>
+                </div>
+                <!-- Card 6 -->
+                <div class="feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-gauge-high"></i></div>
+                    <h3>Fsync Strategies</h3>
+                    <p>Tune the durability-performance trade-off with buffered writing, periodic background flushing, or synchronous fsync on every write operation.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture & Flow Diagram -->
+        <section class="architecture-section" id="architecture">
+            <div class="section-header">
+                <h2 class="section-title">How It Works</h2>
+                <p class="section-description">Understanding the Bitcask storage and lookup flow.</p>
+            </div>
+            <div class="architecture-container">
+                <div class="arch-tabs">
+                    <button class="arch-tab active" data-tab="write-tab">Write Path</button>
+                    <button class="arch-tab" data-tab="read-tab">Read Path</button>
+                    <button class="arch-tab" data-tab="merge-tab">Compaction (Merge)</button>
+                </div>
+                <div class="arch-content">
+                    <!-- Write tab content -->
+                    <div class="tab-pane active" id="write-tab">
+                        <div class="arch-grid">
+                            <div class="arch-text">
+                                <span class="step-num">01</span>
+                                <h3>The Append-Only Write Path</h3>
+                                <p>When a client writes a key-value pair, the database processes the write sequentially:</p>
+                                <ul class="arch-list">
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Create Record:</strong> Encapsulates data into a binary entry with CRC32, timestamp, TTL, key size, and value size.</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Append to Log:</strong> Writes the serialized entry directly to the tail of the current Active Segment.</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Update Index:</strong> Inserts a reference mapping the key to the new file ID, offset, and size in the in-memory HashTable.</li>
+                                </ul>
+                            </div>
+                            <div class="arch-visual">
+                                <div class="visual-card">
+                                    <div class="visual-header">Write Operation</div>
+                                    <div class="flow-step">
+                                        <div class="flow-box client-box">Client: Set("foo", "bar")</div>
+                                        <div class="flow-arrow"><i class="fa-solid fa-arrow-down"></i></div>
+                                        <div class="flow-box active-log-box">Active Segment (Append-Only)</div>
+                                        <div class="flow-arrow"><i class="fa-solid fa-arrow-right"></i> Update Index</div>
+                                        <div class="flow-box keydir-box">HashTable (In-Memory KeyDir)</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Read tab content -->
+                    <div class="tab-pane" id="read-tab">
+                        <div class="arch-grid">
+                            <div class="arch-text">
+                                <span class="step-num">02</span>
+                                <h3>The Single-Seek Read Path</h3>
+                                <p>Lookup performs at maximum speed since the location of every key is always in memory:</p>
+                                <ul class="arch-list">
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>O(1) Search:</strong> Checks the HashTable index map. If the key doesn't exist, we immediately return Not Found (no disk read needed!).</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Verify TTL:</strong> Checks if the key has expired. If so, treats it as deleted.</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Single Disk Seek:</strong> Fetches the record from the stored File ID at the precise Offset in a single disk seek.</li>
+                                </ul>
+                            </div>
+                            <div class="arch-visual">
+                                <div class="visual-card">
+                                    <div class="visual-header">Read Operation</div>
+                                    <div class="flow-step">
+                                        <div class="flow-box client-box">Client: Get("foo")</div>
+                                        <div class="flow-arrow"><i class="fa-solid fa-arrow-right"></i> Check Index First</div>
+                                        <div class="flow-box keydir-box">HashTable (Key Found: Offset 120, File 1)</div>
+                                        <div class="flow-arrow"><i class="fa-solid fa-arrow-down"></i> Seek directly to Offset</div>
+                                        <div class="flow-box active-log-box">Segment File (Disk) -> Read "bar"</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Merge tab content -->
+                    <div class="tab-pane" id="merge-tab">
+                        <div class="arch-grid">
+                            <div class="arch-text">
+                                <span class="step-num">03</span>
+                                <h3>Garbage Compaction</h3>
+                                <p>To prevent infinite log growth, a background compaction worker cleans up dead logs:</p>
+                                <ul class="arch-list">
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Scan Logs:</strong> Iterates over all inactive segments on disk.</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Filter Dead Entries:</strong> Skips records that are deleted, expired, or have been updated by newer writes.</li>
+                                    <li><i class="fa-solid fa-circle-check text-accent"></i> <strong>Merge Segment:</strong> Rewrites remaining live keys into compressed active segments and swaps them atomically.</li>
+                                </ul>
+                            </div>
+                            <div class="arch-visual">
+                                <div class="visual-card">
+                                    <div class="visual-header">Compaction Process</div>
+                                    <div class="merge-simulation">
+                                        <div class="merge-logs">
+                                            <div class="log-segment-box">
+                                                <h4>Segment 1 (Old)</h4>
+                                                <div class="entry-stripe live">k1 = v1 (Live)</div>
+                                                <div class="entry-stripe dead">k2 = v2 (Stale)</div>
+                                                <div class="entry-stripe expired">k3 = v3 (Expired)</div>
+                                            </div>
+                                            <div class="merge-arrow"><i class="fa-solid fa-angles-right"></i> Compact</div>
+                                            <div class="log-segment-box output">
+                                                <h4>Merged Segment</h4>
+                                                <div class="entry-stripe live">k1 = v1 (Copied)</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Interactive Bitcask Simulator -->
+        <section class="simulator-section" id="simulator">
+            <div class="section-header">
+                <h2 class="section-title">Interactive Simulator</h2>
+                <p class="section-description">See append-only logs and in-memory hash indexing in action. Set keys with TTL, delete them, and run compaction right in your browser!</p>
+            </div>
+            
+            <div class="simulator-container">
+                <!-- Simulator Control Board -->
+                <div class="sim-panel sim-controls">
+                    <h3>Command Console</h3>
+                    <form id="sim-form" onsubmit="event.preventDefault();">
+                        <div class="form-group">
+                            <label for="sim-key">Key</label>
+                            <input type="text" id="sim-key" placeholder="e.g. username" required maxlength="15">
+                        </div>
+                        <div class="form-group">
+                            <label for="sim-value">Value</label>
+                            <input type="text" id="sim-value" placeholder="e.g. saipraveen" required maxlength="20">
+                        </div>
+                        <div class="form-group">
+                            <label for="sim-ttl">TTL (Seconds, Optional)</label>
+                            <input type="number" id="sim-ttl" placeholder="e.g. 10 (empty for none)" min="1">
+                        </div>
+                        <div class="sim-actions">
+                            <button type="button" class="btn-action btn-set" onclick="simSet()"><i class="fa-solid fa-plus"></i> SET</button>
+                            <button type="button" class="btn-action btn-get" onclick="simGet()"><i class="fa-solid fa-magnifying-glass"></i> GET</button>
+                            <button type="button" class="btn-action btn-del" onclick="simDelete()"><i class="fa-solid fa-trash-can"></i> DELETE</button>
+                        </div>
+                    </form>
+                    <div class="sim-util-actions">
+                        <button type="button" class="btn-util" onclick="simMerge()"><i class="fa-solid fa-compress"></i> Trigger Compaction (Merge)</button>
+                        <button type="button" class="btn-util btn-reset" onclick="simReset()"><i class="fa-solid fa-arrow-rotate-right"></i> Reset DB</button>
+                    </div>
+                    <div class="console-output">
+                        <h4>Terminal Log</h4>
+                        <div class="console-log" id="sim-console">
+                            <div class="log-line text-dim">Database initialized. Ready.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Simulator Visualizer -->
+                <div class="sim-panel sim-visualization">
+                    <!-- HashTable block -->
+                    <div class="visualizer-block">
+                        <h3>HashTable Index <span class="badge">In-Memory</span></h3>
+                        <div class="index-table-wrapper">
+                            <table class="index-table">
+                                <thead>
+                                    <tr>
+                                        <th>Key</th>
+                                        <th>File ID</th>
+                                        <th>Offset</th>
+                                        <th>Size</th>
+                                        <th>Expiry</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="index-table-body">
+                                    <tr class="empty-row"><td colspan="5">Index is empty. Set a key to begin.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Disk Logs Block -->
+                    <div class="visualizer-block">
+                        <h3>Segment Files <span class="badge badge-secondary">On-Disk (Append-Only)</span></h3>
+                        <div class="segments-container" id="segments-container">
+                            <div class="sim-segment active-seg" id="seg-1">
+                                <div class="seg-header">
+                                    <span class="seg-name">segment_1.log</span>
+                                    <span class="seg-status active">Active</span>
+                                </div>
+                                <div class="seg-entries" id="seg-entries-1">
+                                    <div class="no-entries">No data written yet.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CLI & Usage Section -->
+        <section class="cli-section" id="cli">
+            <div class="section-header">
+                <h2 class="section-title">Compilation & Usage</h2>
+                <p class="section-description">Quickly build and run the database and CLI on your local macOS or Linux environment.</p>
+            </div>
+            
+            <div class="cli-container">
+                <div class="cli-block">
+                    <h3>1. Build Binaries</h3>
+                    <p>Compile the server daemon and the CLI interactive program:</p>
+                    <div class="code-box">
+                        <span class="code-comment"># Build server and client CLI</span>
+                        <code>go build -o bin/lagerkvd ./cmd/lagerkvd</code>
+                        <code>go build -o bin/lagerkv ./cmd/lagerkv-cli</code>
+                    </div>
+                </div>
+
+                <div class="cli-block">
+                    <h3>2. Start HTTP Server</h3>
+                    <p>Run the storage engine server (by default binds to port 8080 and writes to `data/`):</p>
+                    <div class="code-box">
+                        <span class="code-comment"># Start the background server</span>
+                        <code>./bin/lagerkvd</code>
+                    </div>
+                </div>
+
+                <div class="cli-block">
+                    <h3>3. Use CLI Client</h3>
+                    <p>Interact with the database using the compiled client CLI:</p>
+                    <div class="code-box">
+                        <span class="code-comment"># Set a key-value with 60 seconds TTL</span>
+                        <code>./bin/lagerkv set username saipraveen --ttl 60s</code>
+                        <span class="code-comment"># Get the value</span>
+                        <code>./bin/lagerkv get username</code>
+                        <span class="code-comment"># List all active keys</span>
+                        <code>./bin/lagerkv list</code>
+                        <span class="code-comment"># View database engine statistics</span>
+                        <code>./bin/lagerkv stats</code>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="footer-container">
+            <div class="footer-brand">
+                <i class="fa-solid fa-database"></i> LagerKV
+            </div>
+            <p class="footer-text">
+                Designed and implemented as a portfolio project by <a href="https://github.com/N-Saipraveen" target="_blank">N-Saipraveen</a>.
+            </p>
+            <div class="footer-links">
+                <a href="https://github.com/N-Saipraveen/LagerKV" target="_blank"><i class="fa-brands fa-github"></i> Repository</a>
+                <a href="https://github.com/N-Saipraveen/LagerKV/blob/main/LICENSE" target="_blank"><i class="fa-solid fa-scale-balanced"></i> MIT License</a>
+            </div>
+        </div>
+    </footer>
+
+    <!-- JS Scripts -->
+    <script src="script.js"></script>
+</body>
+</html>
