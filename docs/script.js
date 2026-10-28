@@ -1,193 +1,357 @@
-// JS Controller for LagerKV Store Documentation Page & Simulator
+/* ==========================================================================
+   LagerKV — page controller
+   Architecture tabs · mobile menu · clipboard · Bitcask simulator
+   ========================================================================== */
 
-// 1. Architecture Tabs controller
 document.addEventListener("DOMContentLoaded", () => {
-    const tabs = document.querySelectorAll(".arch-tab");
-    const panes = document.querySelectorAll(".tab-pane");
-
-    tabs.forEach(tab => {
-        tab.addEventListener("click", () => {
-            tabs.forEach(t => t.classList.remove("active"));
-            panes.forEach(p => p.classList.remove("active"));
-
-            tab.classList.add("active");
-            const targetId = tab.getAttribute("data-tab");
-            document.getElementById(targetId).classList.add("active");
-        });
-    });
-
-    // Start Expiry checker for the simulator
-    setInterval(checkExpirations, 1000);
+    initTabs();
+    initMobileMenu();
+    initCopyButtons();
+    initSimulator();
 });
 
-// 2. Bitcask Simulator State
-let simIndex = new Map(); // Key -> { fileID, valuePos, valueSize, timestamp, expiry }
+/* --------------------------------------------------------------------------
+   Tabs
+   -------------------------------------------------------------------------- */
+function initTabs() {
+    const tabs = Array.from(document.querySelectorAll(".arch-tab"));
+
+    const activate = (tab) => {
+        tabs.forEach((t) => {
+            const selected = t === tab;
+            t.setAttribute("aria-selected", String(selected));
+            t.tabIndex = selected ? 0 : -1;
+            const pane = document.getElementById(t.getAttribute("aria-controls"));
+            if (pane) pane.hidden = !selected;
+        });
+    };
+
+    tabs.forEach((tab, i) => {
+        tab.addEventListener("click", () => activate(tab));
+        tab.addEventListener("keydown", (e) => {
+            let next = null;
+            if (e.key === "ArrowRight") next = tabs[(i + 1) % tabs.length];
+            else if (e.key === "ArrowLeft") next = tabs[(i - 1 + tabs.length) % tabs.length];
+            else if (e.key === "Home") next = tabs[0];
+            else if (e.key === "End") next = tabs[tabs.length - 1];
+            if (next) {
+                e.preventDefault();
+                activate(next);
+                next.focus();
+            }
+        });
+    });
+}
+
+/* --------------------------------------------------------------------------
+   Mobile menu
+   -------------------------------------------------------------------------- */
+function initMobileMenu() {
+    const toggle = document.getElementById("menu-toggle");
+    const menu = document.getElementById("mobile-menu");
+    if (!toggle || !menu) return;
+
+    const setOpen = (open) => {
+        toggle.setAttribute("aria-expanded", String(open));
+        menu.hidden = !open;
+    };
+
+    toggle.addEventListener("click", () => {
+        setOpen(toggle.getAttribute("aria-expanded") !== "true");
+    });
+
+    menu.querySelectorAll("a").forEach((link) => {
+        link.addEventListener("click", () => setOpen(false));
+    });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && toggle.getAttribute("aria-expanded") === "true") {
+            setOpen(false);
+            toggle.focus();
+        }
+    });
+
+    const desktop = window.matchMedia("(min-width: 861px)");
+    const handle = (e) => { if (e.matches) setOpen(false); };
+    if (desktop.addEventListener) desktop.addEventListener("change", handle);
+    else if (desktop.addListener) desktop.addListener(handle);
+}
+
+/* --------------------------------------------------------------------------
+   Clipboard
+   -------------------------------------------------------------------------- */
+function initCopyButtons() {
+    document.querySelectorAll(".code-box").forEach((box) => {
+        const btn = box.querySelector(".copy-btn");
+        const code = box.querySelector("code");
+        if (!btn || !code) return;
+
+        btn.addEventListener("click", async () => {
+            const text = code.innerText
+                .split("\n")
+                .filter((line) => !line.trim().startsWith("#"))
+                .join("\n")
+                .trim();
+
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch (err) {
+                const range = document.createRange();
+                range.selectNodeContents(code);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            }
+
+            const original = btn.textContent;
+            btn.textContent = "Copied";
+            btn.classList.add("is-copied");
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.classList.remove("is-copied");
+            }, 1600);
+        });
+    });
+}
+
+/* --------------------------------------------------------------------------
+   Simulator state
+   -------------------------------------------------------------------------- */
+let simIndex = new Map(); // key -> { fileID, valuePos, valueSize, timestamp, expiry }
 let simSegments = {
-    1: {
-        id: 1,
-        entries: [], // list of { offset, crc, timestamp, expiry, key, value, size, isTombstone }
-        size: 0,
-        active: true
-    }
+    1: { id: 1, entries: [], size: 0, active: true }
 };
 let activeSegmentID = 1;
 let nextSegmentID = 2;
-const MAX_SEGMENT_ENTRIES = 4; // Low number for easy visualization
+const MAX_SEGMENT_ENTRIES = 4; // kept low so rotation is easy to watch
 
-// Terminal Logging helper
+function initSimulator() {
+    const set = document.getElementById("btn-set");
+    const get = document.getElementById("btn-get");
+    const del = document.getElementById("btn-del");
+    const merge = document.getElementById("btn-merge");
+    const reset = document.getElementById("btn-reset");
+    const form = document.getElementById("sim-form");
+
+    if (set) set.addEventListener("click", simSet);
+    if (get) get.addEventListener("click", simGet);
+    if (del) del.addEventListener("click", simDelete);
+    if (merge) merge.addEventListener("click", simMerge);
+    if (reset) reset.addEventListener("click", simReset);
+
+    if (form) {
+        form.addEventListener("submit", (e) => {
+            e.preventDefault();
+            simSet();
+        });
+    }
+
+    setInterval(checkExpirations, 1000);
+}
+
+/* --------------------------------------------------------------------------
+   Terminal logging — monochrome. Weight, case and inversion carry the state.
+   -------------------------------------------------------------------------- */
+const LOG_TAGS = {
+    dim: "",
+    info: "INFO",
+    success: "OK",
+    warning: "WARN",
+    error: "ERR"
+};
+
 function logToTerminal(message, type = "dim") {
     const consoleEl = document.getElementById("sim-console");
-    const timestamp = new Date().toLocaleTimeString();
+    if (!consoleEl) return;
+
+    const stamp = new Date().toLocaleTimeString([], { hour12: false });
     const line = document.createElement("div");
     line.className = `log-line text-${type}`;
-    line.innerHTML = `<span class="text-dim">[${timestamp}]</span> ${message}`;
+
+    const tag = LOG_TAGS[type];
+    line.innerHTML =
+        `<span class="log-stamp">[${stamp}]</span> ` +
+        (tag ? `<span class="log-tag">${tag}</span>` : "") +
+        escapeHtml(message);
+
     consoleEl.appendChild(line);
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-// Generate a mock CRC32 hex string
-function generateMockCRC() {
-    return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
 
-// Render the HashTable UI
+function generateMockCRC() {
+    return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, "0");
+}
+
+/* --------------------------------------------------------------------------
+   Rendering
+   -------------------------------------------------------------------------- */
 function renderHashTable() {
     const tbody = document.getElementById("index-table-body");
+    if (!tbody) return;
     tbody.innerHTML = "";
 
     if (simIndex.size === 0) {
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Index is empty. Set a key to begin.</td></tr>`;
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Index is empty. Set a key to begin.</td></tr>';
         return;
     }
 
     const now = Math.floor(Date.now() / 1000);
+
     simIndex.forEach((entry, key) => {
         const row = document.createElement("tr");
         row.id = `index-row-${key}`;
 
         let expiryStr = "Never";
+        let expiryClass = "idx-expiry-none";
         if (entry.expiry > 0) {
             const diff = entry.expiry - now;
-            expiryStr = diff > 0 ? `${diff}s remaining` : "Expired";
+            expiryStr = diff > 0 ? `${diff}s left` : "Expired";
+            expiryClass = "idx-expiry-live";
         }
 
         row.innerHTML = `
-            <td style="font-weight: 600; color: #a5b4fc;">"${key}"</td>
+            <td class="idx-key">"${escapeHtml(key)}"</td>
             <td>${entry.fileID}</td>
-            <td>${entry.valuePos} bytes</td>
-            <td>${entry.valueSize} bytes</td>
-            <td style="color: ${entry.expiry > 0 ? '#fbbf24' : '#64748b'}">${expiryStr}</td>
+            <td>${entry.valuePos} B</td>
+            <td>${entry.valueSize} B</td>
+            <td class="${expiryClass}">${expiryStr}</td>
         `;
         tbody.appendChild(row);
     });
 }
 
-// Render Segment Logs UI
 function renderSegments() {
     const container = document.getElementById("segments-container");
+    if (!container) return;
     container.innerHTML = "";
 
-    Object.keys(simSegments).sort((a, b) => a - b).forEach(id => {
-        const seg = simSegments[id];
-        const segEl = document.createElement("div");
-        segEl.className = `sim-segment ${seg.active ? 'active-seg' : ''}`;
-        segEl.id = `segment-card-${id}`;
+    Object.keys(simSegments)
+        .map(Number)
+        .sort((a, b) => a - b)
+        .forEach((id) => {
+            const seg = simSegments[id];
 
-        let statusText = seg.active ? 'Active' : 'Inactive';
-        let statusClass = seg.active ? 'active' : 'inactive';
+            const segEl = document.createElement("div");
+            segEl.className = `sim-segment ${seg.active ? "active-seg" : ""}`;
+            segEl.id = `segment-card-${id}`;
 
-        const header = document.createElement("div");
-        header.className = "seg-header";
-        header.innerHTML = `
-            <span class="seg-name">segment_${id}.log</span>
-            <span class="seg-status ${statusClass}">${statusText}</span>
-        `;
-        segEl.appendChild(header);
+            const header = document.createElement("div");
+            header.className = "seg-header";
+            header.innerHTML = `
+                <span class="seg-name">segment_${id}.log</span>
+                <span class="seg-status ${seg.active ? "active" : "inactive"}">${seg.active ? "Active" : "Sealed"}</span>
+            `;
+            segEl.appendChild(header);
 
-        const entriesEl = document.createElement("div");
-        entriesEl.className = "seg-entries";
-        entriesEl.id = `seg-entries-${id}`;
+            const entriesEl = document.createElement("div");
+            entriesEl.className = "seg-entries";
+            entriesEl.id = `seg-entries-${id}`;
 
-        if (seg.entries.length === 0) {
-            entriesEl.innerHTML = `<div class="no-entries">No data written yet.</div>`;
-        } else {
-            seg.entries.forEach(entry => {
-                const recBox = document.createElement("div");
-                recBox.className = `record-box ${entry.isTombstone ? 'tombstone-record' : ''}`;
-                recBox.id = `record-${id}-${entry.offset}`;
+            if (seg.entries.length === 0) {
+                entriesEl.innerHTML = '<div class="no-entries">No data written yet.</div>';
+            } else {
+                seg.entries.forEach((entry) => {
+                    const recBox = document.createElement("div");
+                    recBox.className = `record-box ${entry.isTombstone ? "tombstone-record" : ""}`;
+                    recBox.id = `record-${id}-${entry.offset}`;
 
-                let expiryLabel = entry.expiry > 0 ? `Expiry: ${entry.expiry}` : "Expiry: None";
-                recBox.innerHTML = `
-                    <div class="record-offset">Offset: ${entry.offset} bytes | Size: ${entry.size} bytes</div>
-                    <div class="record-binary">
-                        <span class="bin-part bin-crc" title="CRC32 Checksum">CRC:${entry.crc}</span>
-                        <span class="bin-part bin-ts" title="Unix Timestamp">TS:${entry.timestamp}</span>
-                        <span class="bin-part bin-ttl" title="Expiration Timestamp">EXP:${entry.expiry}</span>
-                        <span class="bin-part bin-ks" title="Key Size in Bytes">KS:${entry.key.length}B</span>
-                        <span class="bin-part bin-vs" title="Value Size in Bytes">VS:${entry.valueSize}B</span>
-                        <span class="bin-part bin-key" title="Key data">"${entry.key}"</span>
-                        ${!entry.isTombstone ? `<span class="bin-part bin-val" title="Value data">"${entry.value}"</span>` : ''}
-                    </div>
-                    <div class="record-text">
-                        <strong>Raw Bytes:</strong> 
-                        <span style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-secondary);">
-                            [0x${entry.crc}] [${entry.timestamp}] [${entry.expiry}] [${entry.key.length}] [${entry.valueSize}] "${entry.key}" ${!entry.isTombstone ? `"${entry.value}"` : ''}
-                        </span>
-                    </div>
-                `;
-                entriesEl.appendChild(recBox);
-            });
-        }
+                    const valueChip = entry.isTombstone
+                        ? ""
+                        : `<span class="bin-part bin-val" title="Value data">"${escapeHtml(entry.value)}"</span>`;
 
-        segEl.appendChild(entriesEl);
-        container.appendChild(segEl);
-    });
+                    const rawValue = entry.isTombstone ? "" : ` "${escapeHtml(entry.value)}"`;
 
-    // Auto-scroll segments visualizer to the bottom
+                    recBox.innerHTML = `
+                        <div class="record-offset">Offset ${entry.offset} B &middot; ${entry.size} B</div>
+                        <div class="record-binary">
+                            <span class="bin-part bin-crc" title="CRC32 checksum">CRC:${entry.crc}</span>
+                            <span class="bin-part bin-ts" title="Unix timestamp">TS:${entry.timestamp}</span>
+                            <span class="bin-part bin-ttl" title="Expiry timestamp">EXP:${entry.expiry}</span>
+                            <span class="bin-part bin-ks" title="Key size">${entry.key.length}B</span>
+                            <span class="bin-part bin-vs" title="Value size">${entry.valueSize}B</span>
+                            <span class="bin-part bin-key" title="Key data">"${escapeHtml(entry.key)}"</span>
+                            ${valueChip}
+                        </div>
+                        <div class="record-text">
+                            Raw bytes:
+                            <span class="raw-bytes">[0x${entry.crc}] [${entry.timestamp}] [${entry.expiry}] [${entry.key.length}] [${entry.valueSize}] "${escapeHtml(entry.key)}"${rawValue}</span>
+                        </div>
+                    `;
+                    entriesEl.appendChild(recBox);
+                });
+            }
+
+            segEl.appendChild(entriesEl);
+            container.appendChild(segEl);
+        });
+
     container.scrollTop = container.scrollHeight;
 }
 
-// Check expiration of keys
+/* --------------------------------------------------------------------------
+   Monochrome flashes — inversion for a write, a hairline tint for a read
+   -------------------------------------------------------------------------- */
+function flashElement(el, kind, duration = 1000) {
+    if (!el) return;
+    const cls = `flash-${kind}`;
+    el.classList.add(cls);
+    setTimeout(() => el.classList.remove(cls), duration);
+}
+
+/* --------------------------------------------------------------------------
+   Expiry
+   -------------------------------------------------------------------------- */
 function checkExpirations() {
     const now = Math.floor(Date.now() / 1000);
-    let expiredKeys = [];
+    const expired = [];
 
     simIndex.forEach((entry, key) => {
-        if (entry.expiry > 0 && entry.expiry <= now) {
-            expiredKeys.push(key);
-        }
+        if (entry.expiry > 0 && entry.expiry <= now) expired.push(key);
     });
 
-    if (expiredKeys.length > 0) {
-        expiredKeys.forEach(key => {
+    if (expired.length > 0) {
+        expired.forEach((key) => {
             simIndex.delete(key);
-            logToTerminal(`Key '${key}' expired. Lazily removed from In-Memory Index.`, "warning");
+            logToTerminal(`Key '${key}' expired. Removed lazily from the in-memory index.`, "warning");
         });
         renderHashTable();
     } else if (simIndex.size > 0) {
-        // Just re-render table to decrement countdowns
-        renderHashTable();
+        renderHashTable(); // refresh the countdowns
     }
 }
 
-// Rotate segment
+/* --------------------------------------------------------------------------
+   Segment rotation
+   -------------------------------------------------------------------------- */
 function rotateActiveSegment() {
     const oldID = activeSegmentID;
     simSegments[oldID].active = false;
-    
+
     const newID = nextSegmentID++;
-    simSegments[newID] = {
-        id: newID,
-        entries: [],
-        size: 0,
-        active: true
-    };
+    simSegments[newID] = { id: newID, entries: [], size: 0, active: true };
     activeSegmentID = newID;
 
-    logToTerminal(`Segment_${oldID}.log reached capacity. Rotated to active Segment_${newID}.log`, "info");
+    logToTerminal(`segment_${oldID}.log reached capacity. Rotated to segment_${newID}.log`, "info");
 }
 
-// Form logic actions: SET
+function ensureCapacity() {
+    if (simSegments[activeSegmentID].entries.length >= MAX_SEGMENT_ENTRIES) {
+        rotateActiveSegment();
+    }
+    return simSegments[activeSegmentID];
+}
+
+/* --------------------------------------------------------------------------
+   Commands
+   -------------------------------------------------------------------------- */
 function simSet() {
     const keyEl = document.getElementById("sim-key");
     const valEl = document.getElementById("sim-value");
@@ -195,99 +359,77 @@ function simSet() {
 
     const key = keyEl.value.trim();
     const val = valEl.value.trim();
+
     if (!key || !val) {
-        logToTerminal("ERROR: Key and Value are required for SET.", "error");
+        logToTerminal("Key and value are both required for SET.", "error");
         return;
     }
 
     const now = Math.floor(Date.now() / 1000);
     let expiry = 0;
-    if (ttlEl.value) {
-        expiry = now + parseInt(ttlEl.value);
-    }
+    if (ttlEl.value) expiry = now + parseInt(ttlEl.value, 10);
 
-    // Binary format layout sizes
     const keySize = key.length;
     const valSize = val.length;
-    const recordSize = 20 + keySize + valSize; // Header is 20 bytes
+    const recordSize = 20 + keySize + valSize; // 20-byte header
 
-    const currentSeg = simSegments[activeSegmentID];
-    
-    // Rotate segment if active segment exceeds capacity
-    if (currentSeg.entries.length >= MAX_SEGMENT_ENTRIES) {
-        rotateActiveSegment();
-    }
-
-    const activeSeg = simSegments[activeSegmentID];
+    const activeSeg = ensureCapacity();
     const offset = activeSeg.size;
-    const crc = generateMockCRC();
 
-    const record = {
-        offset: offset,
-        crc: crc,
+    activeSeg.entries.push({
+        offset,
+        crc: generateMockCRC(),
         timestamp: now,
-        expiry: expiry,
-        key: key,
+        expiry,
+        key,
         value: val,
         valueSize: valSize,
         size: recordSize,
         isTombstone: false
-    };
-
-    activeSeg.entries.push(record);
+    });
     activeSeg.size += recordSize;
 
-    // Update index
     simIndex.set(key, {
         fileID: activeSegmentID,
         valuePos: offset,
         valueSize: valSize,
         timestamp: now,
-        expiry: expiry
+        expiry
     });
 
-    logToTerminal(`SET key='${key}' value='${val}' at offset=${offset} in segment_${activeSegmentID}.log (CRC Checked)`, "success");
+    logToTerminal(
+        `SET '${key}' = '${val}' at offset ${offset} in segment_${activeSegmentID}.log` +
+        (expiry ? ` (ttl ${ttlEl.value}s)` : ""),
+        "success"
+    );
 
-    // UI Animations
     renderHashTable();
     renderSegments();
 
-    // Reset fields
     keyEl.value = "";
     valEl.value = "";
     ttlEl.value = "";
 
-    // Highlight visual additions
     setTimeout(() => {
-        const row = document.getElementById(`index-row-${key}`);
-        if (row) {
-            row.classList.add("glowing-highlight");
-            setTimeout(() => row.classList.remove("glowing-highlight"), 1000);
-        }
-
-        const box = document.getElementById(`record-${activeSegmentID}-${offset}`);
-        if (box) {
-            box.classList.add("glowing-highlight");
-            setTimeout(() => box.classList.remove("glowing-highlight"), 1000);
-        }
+        flashElement(document.getElementById(`index-row-${key}`), "read", 800);
+        flashElement(document.getElementById(`record-${activeSegmentID}-${offset}`), "write", 1000);
     }, 100);
 }
 
-// GET Key
 function simGet() {
     const keyEl = document.getElementById("sim-key");
     const key = keyEl.value.trim();
 
     if (!key) {
-        logToTerminal("ERROR: Key is required for GET.", "error");
+        logToTerminal("A key is required for GET.", "error");
         return;
     }
 
-    logToTerminal(`GET key='${key}'... querying HashTable index.`, "dim");
+    logToTerminal(`GET '${key}' — consulting the KeyDir index…`, "dim");
 
     const indexEntry = simIndex.get(key);
     if (!indexEntry) {
-        logToTerminal(`GET key='${key}' failed: Key not found in index.`, "error");
+        logToTerminal(`GET '${key}' failed: key not present in the index. No disk read performed.`, "error");
         return;
     }
 
@@ -295,214 +437,146 @@ function simGet() {
     if (indexEntry.expiry > 0 && indexEntry.expiry <= now) {
         simIndex.delete(key);
         renderHashTable();
-        logToTerminal(`GET key='${key}' failed: Key has expired.`, "error");
+        logToTerminal(`GET '${key}' failed: the key expired.`, "error");
         return;
     }
 
-    // Highlight row in index table
-    const row = document.getElementById(`index-row-${key}`);
-    if (row) {
-        row.classList.add("glowing-highlight-blue");
-        setTimeout(() => row.classList.remove("glowing-highlight-blue"), 1200);
-    }
+    flashElement(document.getElementById(`index-row-${key}`), "read", 1100);
 
-    // Lookup record in segment
     const segment = simSegments[indexEntry.fileID];
-    if (segment) {
-        const record = segment.entries.find(e => e.offset === indexEntry.valuePos);
-        if (record) {
-            // Verify checksum simulation
-            logToTerminal(`Verifying record CRC32 [${record.crc}]... OK`, "info");
-            logToTerminal(`GET key='${key}' successful -> value='${record.value}' (Read from segment_${indexEntry.fileID}.log at offset=${indexEntry.valuePos})`, "success");
+    const record = segment && segment.entries.find((e) => e.offset === indexEntry.valuePos);
 
-            // Highlight record box on disk
-            setTimeout(() => {
-                const box = document.getElementById(`record-${indexEntry.fileID}-${indexEntry.valuePos}`);
-                if (box) {
-                    box.classList.add("glowing-highlight-blue");
-                    setTimeout(() => box.classList.remove("glowing-highlight-blue"), 1200);
-                }
-            }, 100);
-            return;
-        }
+    if (record) {
+        logToTerminal(`Verifying CRC32 [${record.crc}]… valid`, "info");
+        logToTerminal(
+            `GET '${key}' → '${record.value}' — one seek into segment_${indexEntry.fileID}.log at offset ${indexEntry.valuePos}`,
+            "success"
+        );
+        setTimeout(() => {
+            flashElement(
+                document.getElementById(`record-${indexEntry.fileID}-${indexEntry.valuePos}`),
+                "read",
+                1100
+            );
+        }, 100);
+        return;
     }
 
-    logToTerminal(`ERROR: Disk corruption. Reference index exists, but segment data is missing!`, "error");
+    logToTerminal("Corruption: the index points at a record that is not on disk.", "error");
 }
 
-// DELETE Key
 function simDelete() {
     const keyEl = document.getElementById("sim-key");
     const key = keyEl.value.trim();
 
     if (!key) {
-        logToTerminal("ERROR: Key is required for DELETE.", "error");
+        logToTerminal("A key is required for DELETE.", "error");
         return;
     }
 
-    const indexEntry = simIndex.get(key);
-    if (!indexEntry) {
-        logToTerminal(`DELETE key='${key}' failed: Key not found.`, "error");
+    if (!simIndex.has(key)) {
+        logToTerminal(`DELETE '${key}' failed: key not found.`, "error");
         return;
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const keySize = key.length;
-    const recordSize = 20 + keySize; // Header is 20, value is empty
+    const recordSize = 20 + key.length; // header only, no value
 
-    const currentSeg = simSegments[activeSegmentID];
-    if (currentSeg.entries.length >= MAX_SEGMENT_ENTRIES) {
-        rotateActiveSegment();
-    }
-
-    const activeSeg = simSegments[activeSegmentID];
+    const activeSeg = ensureCapacity();
     const offset = activeSeg.size;
-    const crc = generateMockCRC();
 
-    const tombstoneRecord = {
-        offset: offset,
-        crc: crc,
+    activeSeg.entries.push({
+        offset,
+        crc: generateMockCRC(),
         timestamp: now,
         expiry: 0,
-        key: key,
+        key,
         value: "",
         valueSize: 0,
         size: recordSize,
         isTombstone: true
-    };
-
-    activeSeg.entries.push(tombstoneRecord);
+    });
     activeSeg.size += recordSize;
 
-    // Delete key from HashTable
     simIndex.delete(key);
 
-    logToTerminal(`DELETE key='${key}': Appended Tombstone record to segment_${activeSegmentID}.log at offset=${offset}`, "warning");
+    logToTerminal(
+        `DELETE '${key}': tombstone appended to segment_${activeSegmentID}.log at offset ${offset}`,
+        "warning"
+    );
 
     renderHashTable();
     renderSegments();
 
-    // Highlight the tombstone box
     setTimeout(() => {
-        const box = document.getElementById(`record-${activeSegmentID}-${offset}`);
-        if (box) {
-            box.classList.add("glowing-highlight-red");
-            setTimeout(() => box.classList.remove("glowing-highlight-red"), 1000);
-        }
+        flashElement(document.getElementById(`record-${activeSegmentID}-${offset}`), "delete", 1000);
     }, 100);
 
     keyEl.value = "";
 }
 
-// Trigger Compaction (Merge)
 function simMerge() {
-    logToTerminal(`Compaction triggered. Scanning inactive segments...`, "info");
+    logToTerminal("Compaction triggered. Scanning sealed segments…", "info");
 
-    const inactiveIDs = Object.keys(simSegments).map(Number).filter(id => id !== activeSegmentID);
+    const inactiveIDs = Object.keys(simSegments)
+        .map(Number)
+        .filter((id) => id !== activeSegmentID);
+
     if (inactiveIDs.length === 0) {
-        logToTerminal(`Compaction canceled: No inactive segment logs to merge.`, "warning");
+        logToTerminal("Compaction cancelled: no sealed segments to merge.", "warning");
         return;
     }
 
-    logToTerminal(`Compacting segments: [${inactiveIDs.join(", ")}]`, "dim");
+    logToTerminal(`Segments queued for compaction: [${inactiveIDs.join(", ")}]`, "dim");
 
-    // Gather live keys remaining in the index that map to these inactive segments
-    let keysToCopy = [];
+    const keysToCopy = [];
     simIndex.forEach((entry, key) => {
-        if (inactiveIDs.includes(entry.fileID)) {
-            keysToCopy.push({ key, entry });
-        }
+        if (inactiveIDs.includes(entry.fileID)) keysToCopy.push({ key, entry });
     });
 
-    logToTerminal(`Identified ${keysToCopy.length} live records to salvage. All tombstones and expired values will be discarded.`, "info");
+    logToTerminal(
+        `${keysToCopy.length} live record(s) salvaged. Tombstones and expired values discarded.`,
+        "info"
+    );
 
-    // Create a temporary merge segment
     const mergeSegID = nextSegmentID++;
-    let mergeSeg = {
-        id: mergeSegID,
-        entries: [],
-        size: 0,
-        active: false
-    };
+    const mergeSeg = { id: mergeSegID, entries: [], size: 0, active: false };
 
-    keysToCopy.forEach(item => {
-        const origSegment = simSegments[item.entry.fileID];
-        const origRecord = origSegment.entries.find(e => e.offset === item.entry.valuePos);
+    keysToCopy.forEach(({ key, entry }) => {
+        const origRecord = simSegments[entry.fileID].entries.find((e) => e.offset === entry.valuePos);
+        if (!origRecord) return;
 
-        if (origRecord) {
-            const offset = mergeSeg.size;
-            const newRecord = {
-                ...origRecord,
-                offset: offset
-            };
-            mergeSeg.entries.push(newRecord);
-            mergeSeg.size += newRecord.size;
+        const offset = mergeSeg.size;
+        mergeSeg.entries.push({ ...origRecord, offset });
+        mergeSeg.size += origRecord.size;
 
-            // Update in-memory index pointing to the new merged file ID and new offset
-            simIndex.set(item.key, {
-                ...item.entry,
-                fileID: mergeSegID,
-                valuePos: offset
-            });
-
-            logToTerminal(`  -> Copying live key '${item.key}' to merged segment_${mergeSegID}.log at offset=${offset}`, "dim");
-        }
+        simIndex.set(key, { ...entry, fileID: mergeSegID, valuePos: offset });
+        logToTerminal(`  → '${key}' copied to segment_${mergeSegID}.log at offset ${offset}`, "dim");
     });
 
-    // Delete old inactive segments
-    inactiveIDs.forEach(id => {
+    inactiveIDs.forEach((id) => {
         delete simSegments[id];
-        logToTerminal(`  -> Deleted stale segment_${id}.log`, "warning");
+        logToTerminal(`  → segment_${id}.log deleted`, "warning");
     });
 
-    // Save the merged segment
     simSegments[mergeSegID] = mergeSeg;
 
-    logToTerminal(`Compaction complete! Space reclaimed. Active segment remains segment_${activeSegmentID}.log`, "success");
+    logToTerminal(`Compaction complete. segment_${activeSegmentID}.log remains active.`, "success");
 
     renderHashTable();
     renderSegments();
 }
 
-// Reset Simulator
 function simReset() {
     simIndex.clear();
-    simSegments = {
-        1: {
-            id: 1,
-            entries: [],
-            size: 0,
-            active: true
-        }
-    };
+    simSegments = { 1: { id: 1, entries: [], size: 0, active: true } };
     activeSegmentID = 1;
     nextSegmentID = 2;
 
     const consoleEl = document.getElementById("sim-console");
-    consoleEl.innerHTML = '<div class="log-line text-dim">Database initialized. Ready.</div>';
-    
+    if (consoleEl) consoleEl.innerHTML = "";
+
     renderHashTable();
     renderSegments();
-    logToTerminal("Database state wiped and re-initialized.", "info");
+    logToTerminal("Database wiped and re-initialised.", "info");
 }
-
-// CSS Highlight injector helper
-const styleSheet = document.createElement("style");
-styleSheet.innerText = `
-.glowing-highlight {
-    background-color: rgba(16, 185, 129, 0.25) !important;
-    box-shadow: 0 0 15px rgba(16, 185, 129, 0.4) !important;
-    transition: all 0.2s ease;
-}
-.glowing-highlight-blue {
-    background-color: rgba(99, 102, 241, 0.3) !important;
-    box-shadow: 0 0 15px rgba(99, 102, 241, 0.5) !important;
-    transition: all 0.2s ease;
-}
-.glowing-highlight-red {
-    background-color: rgba(239, 68, 68, 0.3) !important;
-    box-shadow: 0 0 15px rgba(239, 68, 68, 0.5) !important;
-    transition: all 0.2s ease;
-}
-`;
-document.head.appendChild(styleSheet);
